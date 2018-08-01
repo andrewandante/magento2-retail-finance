@@ -7,13 +7,16 @@ use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use LendingWorks\RetailFinance\Helper\Data;
+use Magento\Checkout\Model\Session;
 use Magento\Framework\App\Action\Context;
 use Magento\Framework\App\Action\Action;
 use Magento\Framework\App\Config\ScopeConfigInterface;
+use Magento\Framework\App\ObjectManager;
 use Magento\Framework\App\ResponseInterface;
 use Magento\Framework\Controller\ResultFactory;
 use Magento\Framework\Controller\ResultInterface;
 use Magento\Framework\Exception\NoSuchEntityException;
+use Magento\Quote\Model\Quote\Item;
 use Magento\Sales\Model\OrderRepository;
 
 class CreateOrder extends Action
@@ -35,6 +38,11 @@ class CreateOrder extends Action
   protected $orderRepository;
 
   /**
+   * @var Session
+   */
+  protected $checkoutSession;
+
+  /**
    * CreateOrder constructor.
    *
    * @param Context              $context
@@ -43,12 +51,14 @@ class CreateOrder extends Action
   public function __construct(
     Context $context,
     ScopeConfigInterface $scopeConfig,
-    OrderRepository $orderRepository
+    OrderRepository $orderRepository,
+    Session $checkoutSession
   )
   {
     parent::__construct($context);
     $this->scopeConfig = $scopeConfig;
     $this->orderRepository = $orderRepository;
+    $this->checkoutSession = $checkoutSession;
   }
   /**
    * Execute action based on request and return result
@@ -62,38 +72,43 @@ class CreateOrder extends Action
       return $this->result(405, 'Method not allowed - use POST');
     }
 
-    $orderID = $this->getRequest()->getPostValue()['orderID'];
-    $amount = $this->getRequest()->getPostValue()['amount'];
+    $quote = $this->checkoutSession->getQuote();
+    $checkoutData = $this->checkoutSession->getStepData();
 
-    try {
-      $order = $this->orderRepository->get($orderID);
-    } catch (NoSuchEntityException $e) {
-      return $this->result(404, "Order {$orderID} not found");
+    if (!$quote) {
+      return $this->result(404, "Order not found");
     }
 
     $products = [];
-    foreach ($order->getItems() as $item) {
+    /** @var Item $item */
+    foreach ($quote->getItems() as $item) {
       $products[] = [
-        'cost' => $item->getBaseCost(),
-        'quantity' => $item->getQtyOrdered(),
-        'description' => $item->getDescription()
+        'cost' => $item->getPrice(),
+        'quantity' => $item->getQty(),
+        'description' => $item->getDescription() ?: $item->getName(),
       ];
     }
 
+    // Add shipping data
+    $products[] = [
+      'cost' => $quote->getShippingAddress()->getShippingAmount(),
+      'quantity' => 1.0,
+      'description' => 'Shipping: ' . $quote->getShippingAddress()->getShippingDescription()
+    ];
+
     $data = [
-      'amount' => $amount,
-      'products' => $products
+      'amount' => $quote->getGrandTotal(),
+      'products' => $products,
     ];
 
     $postData = json_encode($data, JSON_PRESERVE_ZERO_FRACTION | JSON_PRETTY_PRINT);
-
     $hash = md5($postData);
 
-    if (!empty($_SESSION[Data::ORDER_SESSION_KEY])
-      && !empty($_SESSION[Data::ORDER_SESSION_KEY][$hash])) {
-
-      return $this->result(200, 'Order token succesfully loaded');
-    }
+//    if (!empty($_SESSION[Data::ORDER_SESSION_KEY])
+//      && !empty($_SESSION[Data::ORDER_SESSION_KEY][$hash])) {
+//
+//      return $this->result(200, 'Order token succesfully loaded', $_SESSION[Data::ORDER_SESSION_KEY][$hash]);
+//    }
 
     if (json_last_error() !== JSON_ERROR_NONE) {
       return $this->result(400, 'Unable to encode message body'. json_last_error_msg());
@@ -103,7 +118,7 @@ class CreateOrder extends Action
     $apiKey = $this->getRFPaymentConfig(Data::OVERRIDE_API_KEY_KEY);
     $headers = [
       'Content-type' => 'application/json',
-      'Authorization' => 'RetailApiKey ' . $apiKey
+      'Authorization' => 'RetailApiKey ' . $apiKey,
     ];
     $request = new Request('POST', $apiURL, $headers, $postData);
 
@@ -127,10 +142,10 @@ class CreateOrder extends Action
       return $this->result(400, 'Invalid API response, received: ' . $result);
     }
     $_SESSION[Data::ORDER_SESSION_KEY] = [
-      $hash => $result['token']
+      $hash => $result['token'],
     ];
 
-    return $this->result(200, 'Order successfully created');
+    return $this->result(200, 'Order successfully created', $result['token']);
   }
 
   /**
@@ -164,7 +179,7 @@ class CreateOrder extends Action
    *
    * @return ResultInterface
    */
-  private function result($statusCode, $message)
+  private function result($statusCode, $message, $token = null)
   {
     if ($statusCode === 200) {
       $this->messageManager->addSuccessMessage($message);
@@ -172,7 +187,10 @@ class CreateOrder extends Action
       $this->messageManager->addErrorMessage($message);
     }
     $return = $this->resultFactory->create(ResultFactory::TYPE_JSON)->setHttpResponseCode($statusCode);
-    $return->setData(['message' => __($message)]);
+    $return->setData([
+      'message' => __($message),
+      'token' => $token ?: 'none',
+    ]);
 
     return $return;
   }

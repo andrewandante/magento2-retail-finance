@@ -2,27 +2,34 @@ define(
     [
         'Magento_Payment/js/view/payment/iframe',
         'jquery',
-        'Magento_Checkout/js/model/quote'
+        'Magento_Checkout/js/model/quote',
+        'Magento_Ui/js/model/messageList'
     ],
-    function (Component, $, q) {
+    function (Component, $, q, messages) {
         'use strict';
 
         return Component.extend({
             defaults: {
-                template: 'LendingWorks_RetailFinance/payment/retail-finance-form'
+                template: 'LendingWorks_RetailFinance/payment/retail-finance-form',
+                orderToken: '',
+                canApplyForFinance: false
             },
 
             selectPaymentMethod: function () {
+                self = this;
                 $.ajax({
                     showLoader: true,
                     url: '/lwapi/payment/createorder',
-                    data: { amount : this.grandTotal(), orderID: q.getOrderToken() },
                     type: "POST",
                     dataType: 'json'
                 }).done(function (data) {
-                    alert('Request Sent');
+                    self.setOrderToken(data.token);
+                    self.canApplyForFinance = true;
+                    console.log('Request Sent');
                 }).fail(function (data) {
-                    alert('Request Failed')
+                    console.log(data);
+                    console.log('Request Failed');
+                    $('#lw-place-order').attr('disabled', 'disabled');
                 });
                 return this._super();
             },
@@ -47,50 +54,56 @@ define(
             },
 
             getOrderToken: function () {
-                return '<?php echo $_SESSION["lw-rf-order-id"]; ?>';
+                return $('#lw-place-order').data('lw-order-token');
             },
 
-            placeOrder: function () {
+            setOrderToken: function (token) {
+                $('#lw-place-order').data('lw-order-token', token);
+            },
+
+            applyForFinance: function () {
                 self = this;
                 $.getScript('http://secure.docker:3000/checkout.js')
-                    .done(function(script, textStatus) {
-                        console.log(textStatus);
+                    .done(function() {
                         LendingWorksCheckout(
                             self.getOrderToken(),
                             window.location.href,
-                            self.completionHandler()
-                        )();
+                            function (status, id) {
+                                console.log("my status is....");
+                                console.log(status);
+                                console.log('my id is....');
+                                console.log(id);
+                                if (status === 'cancelled') {
+                                    console.log("cancelled...");
+                                    $('#lw-place-order').removeAttr('disabled');
+                                    messages.addErrorMessage({
+                                        message: 'Your application has been cancelled. You may apply again if you wish.'});
+                                    return;
+                                }
+
+                                if (status === 'declined') {
+                                    console.log("declined....");
+                                    messages.addErrorMessage({
+                                        message: 'Sorry, your application has been declined. Please select another payment method.'});
+                                    $('#lw-place-order').attr('disabled', 'disabled');
+                                    // Re-enable submit button and display error message telling customer to
+                                    // pick a different payment method. Also prevent the Lending Works popup
+                                    // from being triggered again.
+                                    return;
+                                }
+
+                                if (['approved', 'referred'].indexOf(status) !== -1) {
+                                    console.log("ya good.");
+                                    self.placeOrder();
+                                }
+                            }
+                        )()
+
                     })
                     .fail(function (jqxhr, settings, exception) {
-                        console.debug(jqxhr);
-                        console.log(exception);
-                        console.log('oh noes');
                     });
-                console.log('ajax fired');
-            },
+                },
 
-            completionHandler: function (id, status) {
-                console.log('my status is....');
-                console.log(status);
-                console.log('my id is....');
-                console.log(id);
-                if (status === 'cancelled') {
-                    // Re-enable submit button.
-                    return;
-                }
-
-                if (status === 'declined') {
-                    // Re-enable submit button and display error message telling customer to
-                    // pick a different payment method. Also prevent the Lending Works popup
-                    // from being triggered again.
-                    return;
-                }
-
-                if (['approved', 'referred'].indexOf(status) !== -1) {
-                    // Trigger form submission.
-                    // Update the form and set the 'id' and 'status' values.
-                }
-            },
         });
     }
 );
